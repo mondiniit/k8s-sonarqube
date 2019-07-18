@@ -1,0 +1,185 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sonarqube
+  labels:
+    name: sonarqube
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name:  postgres-pwd
+  namespace: sonarqube
+data:
+   password: bWVkaXVtcG9zdGdyZXM=
+type: Opaque
+---
+
+apiVersion: extensions/v1beta1
+kind: Deployment
+metadata:
+  name: sonar-postgres
+  namespace: sonarqube
+spec:
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        name: sonar-postgres
+    spec:
+      containers:
+      - name: sonar-postgres
+        image: postgres:latest
+        resources:
+          requests:
+            cpu: 500m
+            memory: 512Mi
+          limits:
+            cpu: 2000m
+            memory: 1024Mi
+        env:
+          - name: POSTGRES_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                key: password
+                name: postgres-pwd
+          - name: POSTGRES_USER
+            value: sonar
+        ports:
+          - containerPort: 5432
+            protocol: TCP
+        volumeMounts:
+          - name: datadisk
+            mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: datadisk
+          persistentVolumeClaim:
+            claimName: claim-postgres
+
+---
+
+kind: PersistentVolume
+apiVersion: v1
+metadata:
+  namespace: sonarqube
+  name: pv0001
+  labels:
+    type: local
+spec:
+  capacity:
+    storage: 5Gi
+  accessModes:
+    - ReadWriteOnce
+  hostPath:
+    path: /data/postgresql/
+---
+kind: PersistentVolumeClaim
+apiVersion: v1
+metadata:
+  name: claim-postgres
+  namespace: sonarqube
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 8Gi
+---
+kind: Service
+apiVersion: v1
+metadata:
+  name:  sonar-postgres
+  namespace: sonarqube
+spec:
+  selector:
+    name:  sonar-postgres
+  type:  NodePort
+  ports:
+  - name:  sonar-postgres
+    port:  5432
+    targetPort:  5432
+---
+
+apiVersion: extensions/v1beta1
+kind: Deployment
+metadata:
+  name: sonarqube
+  namespace: sonarqube
+spec:
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: sonarqube
+        name: sonarqube 
+    spec:
+      securityContext:
+       fsGroup: 999
+      initContainers:
+        - name: init-sysctl
+          image: busybox:1.31
+          command:
+            - sysctl
+            - -w
+            - vm.max_map_count=262144
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+      containers:
+      - name: sonarqube
+        image: sonarqube:latest
+        resources:
+          requests:
+            cpu: 500m
+            memory: 1024Mi
+          limits:
+            cpu: 2000m
+            memory: 2048Mi
+        # volumeMounts:
+        #   - name: sonar-data
+        #     mountPath: /opt/sonarqube/data/
+        #   - name:  sonar-extensions
+        #     mountPath: /opt/sonarqube/extensions/
+        env:
+          - name: SONARQUBE_JDBC_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                key: password
+                name: postgres-pwd
+          - name: SONARQUBE_JDBC_URL
+            value: jdbc:postgresql://sonar-postgres:5432/sonar
+        ports:
+        - containerPort: 9000
+          protocol: TCP
+
+---
+kind: Service
+apiVersion: v1
+metadata:
+  name:  sonarqube
+  namespace: sonarqube
+spec:
+  selector:
+    app: sonarqube
+    name:  sonarqube
+  type: NodePort
+  ports:
+  - name:  http
+    port:  80
+    targetPort:  9000
+---
+apiVersion: extensions/v1beta1
+kind: Ingress
+metadata:
+  name: sonar
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  rules:
+  - http:
+      paths:
+      - path: /sonar
+        backend:
+          serviceName: sonarqube
+          servicePort: http
